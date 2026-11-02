@@ -158,6 +158,27 @@ class Database:
              for i, text in enumerate(split_paragraphs(content), start=1)],
         )
 
+    def submit_draft(self, tenant_id: str, doc_id: str, content: str,
+                     title: str | None = None, category: str | None = None) -> dict:
+        """Add a new draft version, creating the document if needed. Drafts are not
+        searchable or citable until a reviewer approves them."""
+        if not split_paragraphs(content):
+            raise ValueError("Document content is empty")
+        with self.connect() as conn:
+            doc = conn.execute("SELECT tenant_id FROM documents WHERE doc_id = ?", (doc_id,)).fetchone()
+            if doc is None:
+                if not (title and category):
+                    raise ValueError("title and category are required for a new document")
+                conn.execute("INSERT INTO documents VALUES (?, ?, ?, ?)", (doc_id, tenant_id, title, category))
+            elif doc["tenant_id"] != tenant_id:
+                raise LookupError(f"{doc_id} not found")
+            version = conn.execute(
+                "SELECT COALESCE(MAX(version), 0) + 1 FROM document_versions WHERE doc_id = ?", (doc_id,)
+            ).fetchone()[0]
+            self.add_document_version(conn, doc_id, version, "draft", content)
+        return {"doc_id": doc_id, "version": version, "status": "draft",
+                "chunks": len(split_paragraphs(content))}
+
     def approve_version(self, tenant_id: str, doc_id: str, version: int, approver: str) -> dict:
         """Approve a draft version; the previously approved version becomes superseded."""
         with self.connect() as conn:

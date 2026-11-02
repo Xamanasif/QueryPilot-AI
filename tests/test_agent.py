@@ -1,12 +1,14 @@
 import json
 from dataclasses import replace
 
+import httpx
 from conftest import ACME_ANALYST, ACME_REVIEWER, GLOBEX_ANALYST
 from fastapi.testclient import TestClient
 
 from querypilot.agent import Agent, get_run
 from querypilot.api import create_app
-from querypilot.llm import LLMError, ScriptedChatModel, call, final, tool_turn
+from querypilot.demo import run_demo
+from querypilot.llm import GroqChatModel, LLMError, ScriptedChatModel, call, final, tool_turn
 
 
 def tool_results(messages):
@@ -40,6 +42,12 @@ def test_multi_tool_execution_with_verified_citations(db, settings):
     # Tools were offered to the model in Groq function-calling format.
     assert llm.received[0][0]["role"] == "system"
     assert get_run(db, "acme", result.run_id)["review_status"] == "pending"
+
+    # The packaged offline demo chains five tools across checklist, analytics and SQL.
+    demo = run_demo(db, settings)
+    assert demo["status"] == "completed" and demo["tool_calls"] == 5
+    assert demo["citations"] == ["ACME-MSA-001@v1#c2", "ACME-FIN-002@v1#c1"]
+    assert "HHI is 3310.09" in demo["answer"] and "EU revenue is 178350.0" in demo["answer"]
 
 
 def test_hallucinated_citation_triggers_repair_then_fails_closed(db, settings):
@@ -101,10 +109,43 @@ def test_step_and_tool_call_budgets_bound_the_run(db, settings):
     assert [t["ok"] for t in capped.trace if t["event"] == "tool"] == [True, True, False, False]
 
 
-def test_model_failure_is_recorded_not_raised(db, settings):
+def test_groq_adapter_and_model_failure_handling(db, settings):
+    # Scripted HTTP responses in Groq's chat-completions wire format exercise the real adapter.
+    requests = []
+    replies = [
+        {"role": "assistant", "content": None, "tool_calls": [{
+            "id": "call_1", "type": "function",
+            "function": {"name": "weighted_price_summary", "arguments": '{"product": "CU-300"}'}}]},
+        {"role": "assistant", "content": "CU-300 weighted average price is 323.33."},
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        if len(requests) > len(replies):
+            return httpx.Response(400, json={"error": {"message": "tool_use_failed"}})
+        message = replies[len(requests) - 1]
+        return httpx.Response(200, json={
+            "id": f"chatcmpl-{len(requests)}", "object": "chat.completion", "created": 0,
+            "model": "llama-3.3-70b-versatile",
+            "choices": [{"index": 0, "message": message,
+                         "finish_reason": "tool_calls" if message.get("tool_calls") else "stop"}],
+        })
+
+    groq = GroqChatModel("test-key", "llama-3.3-70b-versatile", max_retries=0,
+                         http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+    result = Agent(db, groq, settings).run("CU-300 pricing?", "acme")
+    assert result.status == "completed" and result.answer == "CU-300 weighted average price is 323.33."
+    assert requests[0]["tool_choice"] == "auto" and len(requests[0]["tools"]) == 8
+    tool_reply = requests[1]["messages"][-1]
+    assert tool_reply["role"] == "tool" and tool_reply["tool_call_id"] == "call_1"
+    assert json.loads(tool_reply["content"])["products"][0]["weighted_avg_price"] == 323.33
+
+    # A failing Groq call is recorded on the run, not raised.
+    failed = Agent(db, groq, settings).run("Again?", "acme")
+    assert failed.status == "llm_error" and failed.answer is None
+    assert failed.trace[-1]["error"].startswith("Groq request failed")
     llm = ScriptedChatModel([tool_turn(call("list_evidence_gaps")), LLMError("Groq request failed: 503")])
     result = Agent(db, llm, settings).run("Which gaps remain?", "acme")
-    assert result.status == "llm_error" and result.answer is None
     assert result.trace[-1] == {"step": 2, "event": "llm_error", "error": "Groq request failed: 503"}
     assert get_run(db, "acme", result.run_id)["status"] == "llm_error"
 
@@ -119,12 +160,16 @@ def test_agent_endpoint_and_human_review_flow(app, client):
     assert run["status"] == "completed" and run["review_status"] == "pending"
 
     path = f"/v1/runs/{run['run_id']}"
+    queue = client.get("/v1/runs?review_status=pending", headers=ACME_REVIEWER).json()["runs"]
+    assert [r["run_id"] for r in queue] == [run["run_id"]]
+    assert client.get("/v1/runs", headers=GLOBEX_ANALYST).json()["runs"] == []
     assert client.get(path, headers=GLOBEX_ANALYST).status_code == 404
     assert client.post(f"{path}/review", json={"decision": "approved"}, headers=ACME_ANALYST).status_code == 403
     reviewed = client.post(f"{path}/review", json={"decision": "approved", "note": "Agrees with gap log"},
                            headers=ACME_REVIEWER).json()
     assert reviewed["review_status"] == "approved" and reviewed["reviewer"] == "rui.reviewer"
     assert client.get(path, headers=ACME_ANALYST).json()["review_note"] == "Agrees with gap log"
+    assert client.get("/v1/runs?review_status=pending", headers=ACME_REVIEWER).json()["runs"] == []
 
     # Without GROQ_API_KEY the real model is unavailable and the API says so.
     unconfigured = TestClient(create_app(app.state.settings))

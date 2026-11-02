@@ -66,6 +66,7 @@ stored for human review.
 pip install -r requirements.txt
 python -m querypilot init-db                # creates and seeds data/querypilot.db
 python -m querypilot checklist --tenant acme
+python -m querypilot demo                   # full agent loop offline, scripted model turns
 
 export GROQ_API_KEY=...                     # PowerShell: $env:GROQ_API_KEY="..."
 uvicorn querypilot.api:app_factory --factory --reload
@@ -99,6 +100,7 @@ curl -H "$H" -H 'Content-Type: application/json' localhost:8000/v1/agent/run \
 | GET | `/health` | none | Liveness |
 | GET | `/v1/me` | any | Caller identity |
 | GET | `/v1/documents` | any | Documents and version statuses |
+| POST | `/v1/documents/{doc_id}/versions` | any | Submit a new draft version (or a new document) |
 | POST | `/v1/documents/{doc_id}/versions/{v}/approve` | reviewer | Approve a draft; supersede the prior version |
 | POST | `/v1/search` | any | BM25 search over approved chunks |
 | GET | `/v1/diligence/checklist` | any | Checklist with statuses and citations |
@@ -106,7 +108,17 @@ curl -H "$H" -H 'Content-Type: application/json' localhost:8000/v1/agent/run \
 | GET | `/v1/sql/schema` · POST `/v1/sql` | any | Restricted SQL |
 | GET | `/v1/analytics/rfm` · `/concentration` · `/weighted-prices` | any | Commercial metrics |
 | POST | `/v1/agent/run` | any | Run the Groq agent |
+| GET | `/v1/runs?review_status=pending` | any | Human review queue |
 | GET | `/v1/runs/{id}` · POST `/v1/runs/{id}/review` | any · reviewer | Inspect / sign off a run |
+
+### Governed document lifecycle
+
+```
+analyst: POST /versions ──► draft (not searchable, not citable; gaps list it as "only in draft")
+reviewer: POST /approve ──► approved (searchable, citable) ; previous approved ──► superseded
+```
+
+For example, submitting and approving a facility agreement closes Acme's `CL-06` debt-covenant gap.
 
 ## Agent tools
 
@@ -136,15 +148,19 @@ The 22 local tests run without network access. A `ScriptedChatModel` replays fix
 including tool calls, malformed arguments, hallucinated citations and Groq failures. This makes the
 agent's orchestration deterministic. The tests cover:
 
-- **Security and API:** missing or invalid keys, role checks, cross-tenant isolation across documents,
-  search, SQL and runs.
+- **Security and API:** missing or invalid keys, role checks, the draft → approval lifecycle closing a
+  gap, cross-tenant isolation across documents, drafts, search, SQL and runs.
 - **RAG and diligence:** approved-only retrieval, version supersession, tenant-filtered search,
   checklist citations, gap reasons.
 - **SQL guard:** DML, PRAGMA, ATTACH and stacked statements rejected; `main.*`, `sqlite_master`,
   `api_keys` and `tenant_id` bypasses blocked; automatic tenant filter; row cap.
 - **Analytics:** exact RFM codes, concentration shares, HHI and weighted prices.
-- **Agent:** multi-tool execution with verified citations, citation repair and fail-closed behaviour,
-  tool error recovery, step and tool-call budgets, LLM failure, and the end-to-end API and human review flow.
+- **Agent:** multi-tool execution with verified citations (including the five-tool offline demo),
+  citation repair and fail-closed behaviour, tool error recovery, step and tool-call budgets, and the
+  end-to-end API, review queue and human review flow.
+- **Groq compatibility:** the real `GroqChatModel` adapter runs against scripted HTTP responses in Groq's
+  chat-completions wire format. The test checks the tool schemas sent, the tool-call round trip, and
+  how a Groq API error is handled.
 
 ## Configuration
 

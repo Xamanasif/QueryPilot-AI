@@ -38,10 +38,11 @@ class ChatModel(Protocol):
 
 
 class GroqChatModel:
-    def __init__(self, api_key: str, model: str, temperature: float = 0.0, timeout: float = 60.0):
+    def __init__(self, api_key: str, model: str, temperature: float = 0.0, timeout: float = 60.0,
+                 max_retries: int = 2, http_client=None):
         from groq import Groq
 
-        self.client = Groq(api_key=api_key, timeout=timeout)
+        self.client = Groq(api_key=api_key, timeout=timeout, max_retries=max_retries, http_client=http_client)
         self.model = model
         self.temperature = temperature
 

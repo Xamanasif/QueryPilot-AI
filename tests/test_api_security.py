@@ -22,6 +22,19 @@ def test_only_reviewers_can_approve_document_versions(client):
     # Already-approved versions cannot be approved again.
     assert client.post(path, headers=ACME_REVIEWER).status_code == 409
 
+    # Analysts submit new documents as drafts; they become citable only after approval.
+    body = {"title": "Senior Facility Agreement", "category": "financial",
+            "content": "Debt. A EUR 12 million revolving facility carries a net leverage covenant of 2.5x.\n\n"
+                       "Lender. The facility is provided by a single relationship lender."}
+    draft = client.post("/v1/documents/ACME-DEBT-007/versions", json=body, headers=ACME_ANALYST)
+    assert draft.status_code == 201
+    assert draft.json() == {"doc_id": "ACME-DEBT-007", "version": 1, "status": "draft", "chunks": 2}
+    gaps = {g["item_id"] for g in client.get("/v1/diligence/gaps", headers=ACME_ANALYST).json()["gaps"]}
+    assert "CL-06" in gaps
+    client.post("/v1/documents/ACME-DEBT-007/versions/1/approve", headers=ACME_REVIEWER)
+    gaps = {g["item_id"] for g in client.get("/v1/diligence/gaps", headers=ACME_ANALYST).json()["gaps"]}
+    assert gaps == {"CL-05"}
+
 
 def test_api_enforces_tenant_isolation(client):
     acme_docs = {d["doc_id"] for d in client.get("/v1/documents", headers=ACME_ANALYST).json()["documents"]}
@@ -39,3 +52,6 @@ def test_api_enforces_tenant_isolation(client):
     # A reviewer from another tenant cannot touch Acme's documents.
     assert client.post("/v1/documents/GLX-LEASE-001/versions/1/approve",
                        headers=ACME_REVIEWER).status_code == 404
+    # ...and Globex cannot slip a draft into an Acme document.
+    assert client.post("/v1/documents/ACME-MSA-001/versions", json={"content": "Change of control waived."},
+                       headers=GLOBEX_ANALYST).status_code == 404

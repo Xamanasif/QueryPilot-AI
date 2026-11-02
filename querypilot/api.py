@@ -9,7 +9,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from . import analytics, __version__
-from .agent import Agent, get_run, review_run
+from .agent import Agent, get_run, list_runs, review_run
 from .config import Settings
 from .db import Database, hash_key
 from .diligence import DiligenceReviewer
@@ -28,6 +28,13 @@ class Principal:
 class SearchRequest(BaseModel):
     query: str = Field(min_length=2, max_length=500)
     k: int = Field(default=4, ge=1, le=10)
+
+
+class DraftRequest(BaseModel):
+    content: str = Field(min_length=10, max_length=100_000,
+                         description="Document text; blank lines separate citable passages.")
+    title: str | None = Field(default=None, max_length=200)
+    category: Literal["contract", "financial", "legal", "compliance", "hr"] | None = None
 
 
 class SQLRequest(BaseModel):
@@ -90,6 +97,16 @@ def create_app(settings: Settings | None = None,
     def documents(p: Principal = Depends(authenticate), db: Database = Depends(get_db)) -> dict:
         return {"documents": db.list_documents(p.tenant_id)}
 
+    @app.post("/v1/documents/{doc_id}/versions", status_code=201)
+    def submit_draft(doc_id: str, body: DraftRequest, p: Principal = Depends(authenticate),
+                     db: Database = Depends(get_db)) -> dict:
+        try:
+            return db.submit_draft(p.tenant_id, doc_id, body.content, body.title, body.category)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc))
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+
     @app.post("/v1/documents/{doc_id}/versions/{version}/approve")
     def approve(doc_id: str, version: int, p: Principal = Depends(require_reviewer),
                 db: Database = Depends(get_db)) -> dict:
@@ -144,6 +161,12 @@ def create_app(settings: Settings | None = None,
                   db: Database = Depends(get_db)) -> dict:
         llm = request.app.state.llm_factory()
         return Agent(db, llm, settings).run(body.question, p.tenant_id, p.principal).to_dict()
+
+    @app.get("/v1/runs")
+    def runs(review_status: Literal["pending", "approved", "rejected"] | None = None,
+             limit: int = Query(default=50, ge=1, le=200), p: Principal = Depends(authenticate),
+             db: Database = Depends(get_db)) -> dict:
+        return {"runs": list_runs(db, p.tenant_id, review_status, limit)}
 
     @app.get("/v1/runs/{run_id}")
     def run_detail(run_id: str, p: Principal = Depends(authenticate), db: Database = Depends(get_db)) -> dict:

@@ -156,6 +156,18 @@ def get_run(db: Database, tenant_id: str, run_id: str) -> dict | None:
     return data
 
 
+def list_runs(db: Database, tenant_id: str, review_status: str | None = None, limit: int = 50) -> list[dict]:
+    sql = ("SELECT run_id, principal, question, status, review_status, reviewer, created_at "
+           "FROM agent_runs WHERE tenant_id = ?")
+    params: list = [tenant_id]
+    if review_status:
+        sql += " AND review_status = ?"
+        params.append(review_status)
+    sql += " ORDER BY created_at DESC, run_id LIMIT ?"
+    with db.connect() as conn:
+        return [dict(r) for r in conn.execute(sql, (*params, limit))]
+
+
 def review_run(db: Database, tenant_id: str, run_id: str, reviewer: str, decision: str, note: str | None) -> dict | None:
     with db.connect() as conn:
         cur = conn.execute(
